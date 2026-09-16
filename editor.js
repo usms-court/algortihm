@@ -37,7 +37,7 @@
 
     const STORAGE_KEY = 'usms_algo_editor_draft_v2';
 
-    let stage, canvas, panel, svgEl, viewportG, linkHint;
+    let stage, canvas, panel, svgEl, viewportG, overlayLayer, linkHint;
     let btnUndo, btnRedo;
 
     // ============================================================
@@ -89,13 +89,10 @@
     }
 
     // ============================================================
-    // ИСТОРИЯ (UNDO / REDO)
+    // ИСТОРИЯ
     // ============================================================
     function snapshot() {
-        return JSON.stringify({
-            nodes: state.nodes,
-            edges: state.edges
-        });
+        return JSON.stringify({ nodes: state.nodes, edges: state.edges });
     }
 
     function pushHistory() {
@@ -137,11 +134,8 @@
             saveDraft();
             if (state.activeNodeId) {
                 const stillExists = state.nodes.find(n => n.id === state.activeNodeId);
-                if (stillExists) {
-                    selectNode(state.activeNodeId);
-                } else {
-                    deselect();
-                }
+                if (stillExists) selectNode(state.activeNodeId);
+                else deselect();
             } else {
                 deselect();
             }
@@ -213,9 +207,15 @@
             return;
         }
 
+        overlayLayer = document.createElement('div');
+        overlayLayer.className = 'editor-overlay';
+        overlayLayer.id = 'editorOverlay';
+        canvas.appendChild(overlayLayer);
+
         loadData();
         buildToolbar();
         buildSvg();
+        buildOverlay();
         bindZoom();
         bindPan();
         bindControls();
@@ -269,7 +269,7 @@
                 type: 'process',
                 x: 400 + Math.random() * 200,
                 y: 400 + Math.random() * 200,
-                label: 'Новый блок',
+                label: 'Новый блок 🆕',
                 tooltip: { title: '', description: '', macro: '', template: '', tab: '' }
             };
             state.nodes.push(newNode);
@@ -290,11 +290,8 @@
         const btn = document.getElementById('btnLinkMode');
         if (btn) btn.classList.toggle('ebtn--active', state.linkMode);
 
-        if (state.linkMode) {
-            showLinkHint('🔗 Кликните по блоку-источнику');
-        } else {
-            hideLinkHint();
-        }
+        if (state.linkMode) showLinkHint('🔗 Кликните по блоку-источнику');
+        else hideLinkHint();
         rebuildAll();
     }
 
@@ -337,13 +334,13 @@
         }
 
         state.linkFrom = null;
-        showLinkHint('✅ Связь создана. Кликните по новому источнику или выключите режим');
+        showLinkHint('✅ Связь создана. Кликните по новому источнику');
         rebuildAll();
         return true;
     }
 
     // ============================================================
-    // SVG
+    // SVG (только фигуры и стрелки)
     // ============================================================
     function buildSvg() {
         const NS = 'http://www.w3.org/2000/svg';
@@ -353,6 +350,11 @@
         canvas.style.width = maxX + 'px';
         canvas.style.height = maxY + 'px';
         canvas.innerHTML = '';
+
+        overlayLayer = document.createElement('div');
+        overlayLayer.className = 'editor-overlay';
+        overlayLayer.id = 'editorOverlay';
+        canvas.appendChild(overlayLayer);
 
         svgEl = document.createElementNS(NS, 'svg');
         svgEl.setAttribute('width', maxX);
@@ -381,27 +383,36 @@
         svgEl.appendChild(viewportG);
 
         state.edges.forEach((edge, idx) => viewportG.appendChild(buildEdge(edge, idx)));
-        state.nodes.forEach(node => viewportG.appendChild(buildNode(node)));
+        state.nodes.forEach(node => viewportG.appendChild(buildShape(node)));
 
-        canvas.appendChild(svgEl);
+        canvas.insertBefore(svgEl, overlayLayer);
+    }
+
+    function buildOverlay() {
+        if (!overlayLayer) return;
+        overlayLayer.innerHTML = '';
+        state.nodes.forEach(node => overlayLayer.appendChild(buildTextBlock(node)));
     }
 
     function rebuildAll() {
         buildSvg();
+        buildOverlay();
         applyTransform();
     }
 
-    function buildNode(node) {
+    // ============================================================
+    // ФИГУРА (SVG)
+    // ============================================================
+    function buildShape(node) {
         const NS = 'http://www.w3.org/2000/svg';
         const g = document.createElementNS(NS, 'g');
         g.setAttribute('class', `editor-node editor-node--${node.type}`);
         g.setAttribute('data-node-id', node.id);
-        g.style.cursor = 'pointer';
 
         if (state.linkFrom === node.id) g.classList.add('editor-node--link-source');
         if (state.activeNodeId === node.id) g.classList.add('editor-node--active');
 
-        const { w, h, lines } = computeNodeSize(node);
+        const { w, h } = computeNodeSize(node);
         const isDecision = node.type === 'decision';
         const isTerminal = node.type === 'terminal';
 
@@ -427,35 +438,61 @@
         shape.setAttribute('class', 'editor-node__shape');
         g.appendChild(shape);
 
-        const text = document.createElementNS(NS, 'text');
-        text.setAttribute('x', node.x);
-        text.setAttribute('y', node.y);
-        text.setAttribute('text-anchor', 'middle');
-        text.setAttribute('dominant-baseline', 'middle');
-        text.setAttribute('class', 'editor-node__text');
+        return g;
+    }
 
-        const startDy = -((lines.length - 1) * LINE_H) / 2;
-        lines.forEach((line, idx) => {
-            const tspan = document.createElementNS(NS, 'tspan');
-            tspan.setAttribute('x', node.x);
-            tspan.setAttribute('dy', idx === 0 ? startDy + 4 : LINE_H);
-            if (idx === 0) tspan.setAttribute('y', node.y);
-            tspan.textContent = line;
-            text.appendChild(tspan);
+    // ============================================================
+    // ТЕКСТ (HTML-слой)
+    // ============================================================
+    function buildTextBlock(node) {
+        const { w, h } = computeNodeSize(node);
+        const el = document.createElement('div');
+        el.className = `editor-text editor-text--${node.type}`;
+        el.setAttribute('data-text-node-id', node.id);
+        el.style.left = (node.x - w / 2) + 'px';
+        el.style.top = (node.y - h / 2) + 'px';
+        el.style.width = w + 'px';
+        el.style.height = h + 'px';
+
+        if (state.linkFrom === node.id) el.classList.add('editor-text--link-source');
+        if (state.activeNodeId === node.id) el.classList.add('editor-text--active');
+
+        const inner = document.createElement('span');
+        inner.className = 'editor-text__inner';
+        inner.innerHTML = escapeHtml(node.label).replace(/\n/g, '<br>').replace(/\s/g, (m, offset, str) => {
+            if (m === ' ') return ' ';
+            return m;
         });
-        g.appendChild(text);
+        el.appendChild(inner);
 
-        g.addEventListener('mousedown', (e) => startNodeDrag(e, node));
-        g.addEventListener('click', (e) => {
+        el.addEventListener('mousedown', (e) => startNodeDrag(e, node));
+        el.addEventListener('click', (e) => {
             e.stopPropagation();
             if (state.isDraggingNode) return;
             if (state.linkMode && handleLinkClick(node.id)) return;
             selectNode(node.id);
         });
 
-        return g;
+        return el;
     }
 
+    function updateTextBlockVisual(node) {
+        const el = overlayLayer.querySelector(`[data-text-node-id="${node.id}"]`);
+        if (!el) return;
+
+        const { w, h } = computeNodeSize(node);
+        el.style.left = (node.x - w / 2) + 'px';
+        el.style.top = (node.y - h / 2) + 'px';
+        el.style.width = w + 'px';
+        el.style.height = h + 'px';
+
+        const inner = el.querySelector('.editor-text__inner');
+        if (inner) inner.innerHTML = escapeHtml(node.label);
+    }
+
+    // ============================================================
+    // СТРЕЛКИ
+    // ============================================================
     function buildEdge(edge, idx) {
         const NS = 'http://www.w3.org/2000/svg';
         const g = document.createElementNS(NS, 'g');
@@ -525,6 +562,7 @@
             state.selectedEdgeIndex = idx;
             state.activeNodeId = null;
             document.querySelectorAll('.editor-node').forEach(el => el.classList.remove('editor-node--active'));
+            document.querySelectorAll('.editor-text').forEach(el => el.classList.remove('editor-text--active'));
             renderEdgePanel(edge, idx);
             rebuildAll();
         });
@@ -533,7 +571,7 @@
     }
 
     // ============================================================
-    // DRAG УЗЛА
+    // DRAG
     // ============================================================
     function startNodeDrag(e, node) {
         if (e.button !== 0) return;
@@ -585,28 +623,28 @@
 
     function redraw() {
         state.nodes.forEach(node => {
-            const g = viewportG.querySelector(`[data-node-id="${node.id}"]`);
-            if (!g) return;
             const { w, h } = computeNodeSize(node);
             const isDecision = node.type === 'decision';
-            const shape = g.querySelector('.editor-node__shape');
-            if (isDecision) {
-                shape.setAttribute('points', [
-                    `${node.x},${node.y - h / 2}`,
-                    `${node.x + w / 2},${node.y}`,
-                    `${node.x},${node.y + h / 2}`,
-                    `${node.x - w / 2},${node.y}`
-                ].join(' '));
-            } else {
-                shape.setAttribute('x', node.x - w / 2);
-                shape.setAttribute('y', node.y - h / 2);
-                shape.setAttribute('width', w);
-                shape.setAttribute('height', h);
+
+            const g = viewportG.querySelector(`[data-node-id="${node.id}"]`);
+            if (g) {
+                const shape = g.querySelector('.editor-node__shape');
+                if (isDecision) {
+                    shape.setAttribute('points', [
+                        `${node.x},${node.y - h / 2}`,
+                        `${node.x + w / 2},${node.y}`,
+                        `${node.x},${node.y + h / 2}`,
+                        `${node.x - w / 2},${node.y}`
+                    ].join(' '));
+                } else {
+                    shape.setAttribute('x', node.x - w / 2);
+                    shape.setAttribute('y', node.y - h / 2);
+                    shape.setAttribute('width', w);
+                    shape.setAttribute('height', h);
+                }
             }
-            const text = g.querySelector('.editor-node__text');
-            text.setAttribute('x', node.x);
-            text.setAttribute('y', node.y);
-            text.querySelectorAll('tspan').forEach(tspan => tspan.setAttribute('x', node.x));
+
+            updateTextBlockVisual(node);
         });
 
         viewportG.querySelectorAll('.editor-edge').forEach(g => g.remove());
@@ -623,6 +661,7 @@
         let raf = null, px = 0, py = 0;
         stage.addEventListener('mousedown', (e) => {
             if (e.target.closest('.editor-node')) return;
+            if (e.target.closest('.editor-text')) return;
             if (e.target.closest('.editor-edge')) return;
             state.isPanning = true;
             state.panStart = { x: e.clientX - state.offsetX, y: e.clientY - state.offsetY };
@@ -645,6 +684,7 @@
         });
         stage.addEventListener('click', (e) => {
             if (e.target.closest('.editor-node')) return;
+            if (e.target.closest('.editor-text')) return;
             if (e.target.closest('.editor-edge')) return;
             deselect();
         });
@@ -674,7 +714,9 @@
     }
 
     function applyTransform() {
-        canvas.style.transform = `translate(${state.offsetX}px, ${state.offsetY}px) scale(${state.zoom})`;
+        const t = `translate(${state.offsetX}px, ${state.offsetY}px) scale(${state.zoom})`;
+        canvas.style.transform = t;
+        canvas.style.transformOrigin = '0 0';
     }
 
     function bindControls() {
@@ -710,7 +752,9 @@
         state.activeNodeId = id;
         state.selectedEdgeIndex = -1;
         document.querySelectorAll('.editor-node').forEach(el => el.classList.remove('editor-node--active'));
+        document.querySelectorAll('.editor-text').forEach(el => el.classList.remove('editor-text--active'));
         document.querySelector(`[data-node-id="${id}"]`)?.classList.add('editor-node--active');
+        document.querySelector(`[data-text-node-id="${id}"]`)?.classList.add('editor-text--active');
         renderPanel(node);
     }
 
@@ -718,6 +762,7 @@
         state.activeNodeId = null;
         state.selectedEdgeIndex = -1;
         document.querySelectorAll('.editor-node').forEach(el => el.classList.remove('editor-node--active'));
+        document.querySelectorAll('.editor-text').forEach(el => el.classList.remove('editor-text--active'));
         panel.innerHTML = `
             <div class="editor-panel__empty">
                 <div class="editor-panel__empty-icon">📋</div>
@@ -735,8 +780,8 @@
             </div>
             <div class="editor-panel__body">
                 <label class="efield">
-                    <span class="efield__label">Текст блока</span>
-                    <textarea class="efield__input" id="fLabel" rows="3">${escapeHtml(node.label)}</textarea>
+                    <span class="efield__label">Текст блока (эмодзи поддерживаются)</span>
+                    <textarea class="efield__input" id="fLabel" rows="3" placeholder="Пример: Позвать в канал 🎙️">${escapeHtml(node.label)}</textarea>
                 </label>
                 <label class="efield">
                     <span class="efield__label">Тип блока</span>
@@ -807,14 +852,12 @@
             node.label = fLabel.value;
             rebuildAll();
             if (state.activeNodeId === node.id) {
-                const g = document.querySelector(`[data-node-id="${node.id}"]`);
-                if (g) g.classList.add('editor-node--active');
+                document.querySelector(`[data-node-id="${node.id}"]`)?.classList.add('editor-node--active');
+                document.querySelector(`[data-text-node-id="${node.id}"]`)?.classList.add('editor-text--active');
             }
             saveDraft();
             if (labelInputTimer) clearTimeout(labelInputTimer);
-            labelInputTimer = setTimeout(() => {
-                pushHistory();
-            }, 800);
+            labelInputTimer = setTimeout(() => pushHistory(), 800);
         });
 
         fType.addEventListener('change', () => {
@@ -840,9 +883,7 @@
     function saveDraftDebounced() {
         saveDraft();
         if (_saveHistoryTimer) clearTimeout(_saveHistoryTimer);
-        _saveHistoryTimer = setTimeout(() => {
-            pushHistory();
-        }, 800);
+        _saveHistoryTimer = setTimeout(() => pushHistory(), 800);
     }
 
     function deleteNode(id) {
@@ -889,7 +930,7 @@
             saveDraft();
             redraw();
             if (_saveHistoryTimer) clearTimeout(_saveHistoryTimer);
-            _saveHistoryTimer = setTimeout(() => { pushHistory(); }, 800);
+            _saveHistoryTimer = setTimeout(() => pushHistory(), 800);
         });
         document.getElementById('btnDeleteEdge').addEventListener('click', () => {
             if (!confirm('Удалить эту связь?')) return;
@@ -940,14 +981,18 @@ ${edgesJs}
     ];
 
     const state = { zoom: 1, minZoom: 0.15, maxZoom: 2.5, offsetX: 0, offsetY: 0, isPanning: false, panStart: { x: 0, y: 0 }, activeNodeId: null };
-    let stage, canvas, panel, svgEl, viewportG;
+    let stage, canvas, panel, svgEl, viewportG, overlayLayer;
 
     function init() {
         stage = document.getElementById('algoStage');
         canvas = document.getElementById('algoCanvas');
         panel = document.getElementById('algoPanel');
         if (!stage || !canvas || !panel) return;
-        buildSvg(); bindZoom(); bindPan(); bindControls(); setTimeout(() => centerView(), 30);
+        buildSvg();
+        bindZoom();
+        bindPan();
+        bindControls();
+        setTimeout(() => centerView(), 30);
     }
 
     function buildSvg() {
@@ -956,6 +1001,12 @@ ${edgesJs}
         const maxY = Math.max(...ALGO_NODES.map(n => n.y + 200)) + 300;
         canvas.style.width = maxX + 'px';
         canvas.style.height = maxY + 'px';
+        canvas.innerHTML = '';
+
+        overlayLayer = document.createElement('div');
+        overlayLayer.className = 'algo-overlay';
+        canvas.appendChild(overlayLayer);
+
         svgEl = document.createElementNS(NS, 'svg');
         svgEl.setAttribute('width', maxX);
         svgEl.setAttribute('height', maxY);
@@ -979,8 +1030,32 @@ ${edgesJs}
         viewportG = document.createElementNS(NS, 'g');
         svgEl.appendChild(viewportG);
         ALGO_EDGES.forEach(edge => viewportG.appendChild(buildEdge(edge)));
-        ALGO_NODES.forEach(node => viewportG.appendChild(buildNode(node)));
-        canvas.appendChild(svgEl);
+        ALGO_NODES.forEach(node => viewportG.appendChild(buildShape(node)));
+        canvas.insertBefore(svgEl, overlayLayer);
+        buildOverlay();
+    }
+
+    function buildOverlay() {
+        if (!overlayLayer) return;
+        overlayLayer.innerHTML = '';
+        ALGO_NODES.forEach(node => overlayLayer.appendChild(buildTextBlock(node)));
+    }
+
+    function buildTextBlock(node) {
+        const { w, h } = computeSize(node);
+        const el = document.createElement('div');
+        el.className = 'algo-text algo-text--' + node.type;
+        el.setAttribute('data-text-node-id', node.id);
+        el.style.left = (node.x - w / 2) + 'px';
+        el.style.top = (node.y - h / 2) + 'px';
+        el.style.width = w + 'px';
+        el.style.height = h + 'px';
+        const inner = document.createElement('span');
+        inner.className = 'algo-text__inner';
+        inner.textContent = node.label;
+        el.appendChild(inner);
+        el.addEventListener('click', e => { e.stopPropagation(); selectNode(node.id); });
+        return el;
     }
 
     function computeSize(node) {
@@ -1005,19 +1080,19 @@ ${edgesJs}
         let cur = '';
         words.forEach(w => {
             const t = cur ? cur + ' ' + w : w;
-            if (t.length > maxChars && cur) { lines.push(cur); cur = w; } else { cur = t; }
+            if (t.length > maxChars && cur) { lines.push(cur); cur = w; }
+            else { cur = t; }
         });
         if (cur) lines.push(cur);
         return lines.length ? lines : [''];
     }
 
-    function buildNode(node) {
+    function buildShape(node) {
         const NS = 'http://www.w3.org/2000/svg';
         const g = document.createElementNS(NS, 'g');
         g.setAttribute('class', 'algo-node algo-node--' + node.type);
         g.setAttribute('data-node-id', node.id);
-        g.style.cursor = 'pointer';
-        const { w, h, lines } = computeSize(node);
+        const { w, h } = computeSize(node);
         const isD = node.type === 'decision';
         const isT = node.type === 'terminal';
         let shape;
@@ -1035,23 +1110,6 @@ ${edgesJs}
         }
         shape.setAttribute('class', 'algo-node__shape');
         g.appendChild(shape);
-        const text = document.createElementNS(NS, 'text');
-        text.setAttribute('x', node.x);
-        text.setAttribute('y', node.y);
-        text.setAttribute('text-anchor', 'middle');
-        text.setAttribute('dominant-baseline', 'middle');
-        text.setAttribute('class', 'algo-node__text');
-        const startDy = -((lines.length - 1) * 18) / 2;
-        lines.forEach((line, idx) => {
-            const tspan = document.createElementNS(NS, 'tspan');
-            tspan.setAttribute('x', node.x);
-            tspan.setAttribute('dy', idx === 0 ? startDy + 4 : 18);
-            if (idx === 0) tspan.setAttribute('y', node.y);
-            tspan.textContent = line;
-            text.appendChild(tspan);
-        });
-        g.appendChild(text);
-        g.addEventListener('click', e => { e.stopPropagation(); selectNode(node.id); });
         return g;
     }
 
@@ -1133,6 +1191,7 @@ ${edgesJs}
         let raf = null, px = 0, py = 0;
         stage.addEventListener('mousedown', e => {
             if (e.target.closest('.algo-node')) return;
+            if (e.target.closest('.algo-text')) return;
             state.isPanning = true;
             state.panStart = { x: e.clientX - state.offsetX, y: e.clientY - state.offsetY };
             stage.style.cursor = 'grabbing';
@@ -1145,7 +1204,7 @@ ${edgesJs}
             raf = requestAnimationFrame(() => { raf = null; state.offsetX = px; state.offsetY = py; applyTransform(); });
         });
         window.addEventListener('mouseup', () => { if (state.isPanning) { state.isPanning = false; stage.style.cursor = ''; } });
-        stage.addEventListener('click', e => { if (e.target.closest('.algo-node')) return; deselectNode(); });
+        stage.addEventListener('click', e => { if (e.target.closest('.algo-node')) return; if (e.target.closest('.algo-text')) return; deselectNode(); });
     }
 
     function centerView() {
@@ -1164,13 +1223,16 @@ ${edgesJs}
         if (!node) return;
         state.activeNodeId = id;
         document.querySelectorAll('.algo-node').forEach(el => el.classList.remove('algo-node--active'));
+        document.querySelectorAll('.algo-text').forEach(el => el.classList.remove('algo-text--active'));
         document.querySelector('[data-node-id="' + id + '"]')?.classList.add('algo-node--active');
+        document.querySelector('[data-text-node-id="' + id + '"]')?.classList.add('algo-text--active');
         renderPanel(node);
     }
 
     function deselectNode() {
         state.activeNodeId = null;
         document.querySelectorAll('.algo-node').forEach(el => el.classList.remove('algo-node--active'));
+        document.querySelectorAll('.algo-text').forEach(el => el.classList.remove('algo-text--active'));
         panel.innerHTML = '<div class="algo-panel__empty"><div class="algo-panel__empty-icon">📋</div><div class="algo-panel__empty-text">Кликните по блоку схемы, чтобы увидеть пояснение</div></div>';
     }
 
@@ -1222,27 +1284,13 @@ ${edgesJs}
             const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
             const ctrl = isMac ? e.metaKey : e.ctrlKey;
 
-            if (ctrl && e.key.toLowerCase() === 'z' && !e.shiftKey) {
-                e.preventDefault();
-                undo();
-                return;
-            }
-            if (ctrl && (e.key.toLowerCase() === 'y' || (e.key.toLowerCase() === 'z' && e.shiftKey))) {
-                e.preventDefault();
-                redo();
-                return;
-            }
+            if (ctrl && e.key.toLowerCase() === 'z' && !e.shiftKey) { e.preventDefault(); undo(); return; }
+            if (ctrl && (e.key.toLowerCase() === 'y' || (e.key.toLowerCase() === 'z' && e.shiftKey))) { e.preventDefault(); redo(); return; }
 
             if (e.key === 'Escape') {
-                if (state.linkFrom) {
-                    state.linkFrom = null;
-                    showLinkHint('🔗 Кликните по блоку-источнику');
-                    rebuildAll();
-                } else if (state.linkMode) {
-                    toggleLinkMode(false);
-                } else {
-                    deselect();
-                }
+                if (state.linkFrom) { state.linkFrom = null; showLinkHint('🔗 Кликните по блоку-источнику'); rebuildAll(); }
+                else if (state.linkMode) { toggleLinkMode(false); }
+                else { deselect(); }
             }
             if ((e.key === 'Delete' || e.key === 'Backspace') && state.activeNodeId && document.activeElement.tagName !== 'INPUT' && document.activeElement.tagName !== 'TEXTAREA') {
                 deleteNode(state.activeNodeId);
