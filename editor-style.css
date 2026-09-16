@@ -383,3 +383,15 @@ textarea.efield__input { min-height: 60px; }
     animation: fadeIn 0.2s ease;
     backdrop-filter: blur(4px);
 }
+.ebtn--icon {
+    padding: 10px 14px;
+    min-width: 42px;
+    justify-content: center;
+    font-size: 1rem;
+}
+.ebtn--icon:disabled,
+.ebtn[disabled] {
+    opacity: 0.35;
+    cursor: not-allowed;
+    pointer-events: none;
+}
