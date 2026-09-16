@@ -14,7 +14,9 @@
         activeNodeId: null,
         dragNode: null,
         dragOffset: { x: 0, y: 0 },
-        isDraggingNode: false
+        isDraggingNode: false,
+        linkFrom: null,
+        selectedEdgeIndex: -1
     };
 
     const SIZES = {
@@ -29,25 +31,25 @@
     let stage, canvas, panel, svgEl, viewportG;
 
     // ============================================================
-    // ЗАГРУЗКА ДАННЫХ
+    // ЗАГРУЗКА / СОХРАНЕНИЕ
     // ============================================================
     function loadData() {
         let data = null;
-
         try {
             const saved = localStorage.getItem(STORAGE_KEY);
             if (saved) {
                 const parsed = JSON.parse(saved);
-                if (parsed && Array.isArray(parsed.nodes) && parsed.nodes.length) {
-                    data = parsed;
-                }
+                if (parsed && Array.isArray(parsed.nodes) && parsed.nodes.length) data = parsed;
             }
-        } catch (e) { /* ignore */ }
+        } catch (e) {}
 
         if (!data) {
-            const src = window.USMS_ALGO_DATA || window.USMS_ALGO || {};
-            const srcNodes = src.ALGO_NODES || src.nodes || [];
-            const srcEdges = src.ALGO_EDGES || src.edges || [];
+            const src = window.USMS_ALGO || {};
+            const srcNodes = src.ALGO_NODES || [];
+            const srcEdges = src.ALGO_EDGES || [];
+            if (!srcNodes.length) {
+                console.warn('USMS_ALGO пустой. Проверьте, что algorithm.js экспортирует ALGO_NODES / ALGO_EDGES.');
+            }
             data = {
                 nodes: JSON.parse(JSON.stringify(srcNodes)),
                 edges: JSON.parse(JSON.stringify(srcEdges))
@@ -72,11 +74,8 @@
 
     function saveDraft() {
         try {
-            localStorage.setItem(STORAGE_KEY, JSON.stringify({
-                nodes: state.nodes,
-                edges: state.edges
-            }));
-        } catch (e) { /* ignore */ }
+            localStorage.setItem(STORAGE_KEY, JSON.stringify({ nodes: state.nodes, edges: state.edges }));
+        } catch (e) {}
     }
 
     // ============================================================
@@ -86,16 +85,50 @@
         stage = document.getElementById('algoStage');
         canvas = document.getElementById('algoCanvas');
         panel = document.getElementById('editorPanel');
-        if (!stage || !canvas || !panel) return;
+        if (!stage || !canvas || !panel) {
+            console.error('Не найдены базовые элементы: algoStage / algoCanvas / editorPanel');
+            return;
+        }
 
         loadData();
+        buildToolbar();
         buildSvg();
         bindZoom();
         bindPan();
         bindControls();
         bindHeader();
-
+        bindHotkeys();
         setTimeout(() => centerView(), 30);
+    }
+
+    // ============================================================
+    // ТУЛБАР
+    // ============================================================
+    function buildToolbar() {
+        const header = document.querySelector('.editor-header__actions');
+        if (!header) return;
+
+        const addBtn = document.createElement('button');
+        addBtn.className = 'ebtn ebtn--primary';
+        addBtn.id = 'btnAddNode';
+        addBtn.textContent = '➕ Добавить блок';
+        header.insertBefore(addBtn, header.firstChild);
+
+        addBtn.addEventListener('click', () => {
+            const id = 'node_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6);
+            const newNode = {
+                id,
+                type: 'process',
+                x: 400 + Math.random() * 200,
+                y: 400 + Math.random() * 200,
+                label: 'Новый блок',
+                tooltip: { title: '', description: '', macro: '', template: '', tab: '' }
+            };
+            state.nodes.push(newNode);
+            rebuildAll();
+            selectNode(id);
+            saveDraft();
+        });
     }
 
     // ============================================================
@@ -103,7 +136,6 @@
     // ============================================================
     function buildSvg() {
         const NS = 'http://www.w3.org/2000/svg';
-
         const maxX = Math.max(1200, ...state.nodes.map(n => n.x)) + 400;
         const maxY = Math.max(1000, ...state.nodes.map(n => n.y)) + 300;
 
@@ -137,10 +169,15 @@
         viewportG.setAttribute('id', 'editorViewport');
         svgEl.appendChild(viewportG);
 
-        state.edges.forEach(edge => viewportG.appendChild(buildEdge(edge)));
+        state.edges.forEach((edge, idx) => viewportG.appendChild(buildEdge(edge, idx)));
         state.nodes.forEach(node => viewportG.appendChild(buildNode(node)));
 
         canvas.appendChild(svgEl);
+    }
+
+    function rebuildAll() {
+        buildSvg();
+        applyTransform();
     }
 
     function getSize(type) {
@@ -174,13 +211,8 @@
             shape.setAttribute('y', node.y - h / 2);
             shape.setAttribute('width', w);
             shape.setAttribute('height', h);
-            if (isTerminal) {
-                shape.setAttribute('rx', h / 2);
-                shape.setAttribute('ry', h / 2);
-            } else {
-                shape.setAttribute('rx', 14);
-                shape.setAttribute('ry', 14);
-            }
+            shape.setAttribute('rx', isTerminal ? h / 2 : 14);
+            shape.setAttribute('ry', isTerminal ? h / 2 : 14);
         }
         shape.setAttribute('class', 'editor-node__shape');
         g.appendChild(shape);
@@ -209,8 +241,16 @@
         g.addEventListener('mousedown', (e) => startNodeDrag(e, node));
         g.addEventListener('click', (e) => {
             e.stopPropagation();
-            if (!state.isDraggingNode) selectNode(node.id);
+            if (!state.isDraggingNode) {
+                if (state.linkFrom) {
+                    completeLink(node.id);
+                } else {
+                    selectNode(node.id);
+                }
+            }
         });
+
+        if (state.linkFrom === node.id) g.classList.add('editor-node--linking');
 
         return g;
     }
@@ -232,10 +272,12 @@
         return lines.length ? lines : [''];
     }
 
-    function buildEdge(edge) {
+    function buildEdge(edge, idx) {
         const NS = 'http://www.w3.org/2000/svg';
         const g = document.createElementNS(NS, 'g');
-        g.setAttribute('class', 'editor-edge');
+        g.setAttribute('class', 'editor-edge' + (state.selectedEdgeIndex === idx ? ' editor-edge--selected' : ''));
+        g.setAttribute('data-edge-index', idx);
+        g.style.cursor = 'pointer';
 
         const from = state.nodes.find(n => n.id === edge.from);
         const to = state.nodes.find(n => n.id === edge.to);
@@ -263,6 +305,14 @@
         path.setAttribute('marker-end', 'url(#editorArrow)');
         g.appendChild(path);
 
+        const hitArea = document.createElementNS(NS, 'path');
+        hitArea.setAttribute('d', d);
+        hitArea.setAttribute('stroke', 'transparent');
+        hitArea.setAttribute('stroke-width', '14');
+        hitArea.setAttribute('fill', 'none');
+        hitArea.style.pointerEvents = 'stroke';
+        g.appendChild(hitArea);
+
         if (edge.label) {
             const mx = (x1 + x2) / 2;
             const my = (y1 + y2) / 2;
@@ -286,7 +336,40 @@
             g.appendChild(lbl);
         }
 
+        g.addEventListener('click', (e) => {
+            e.stopPropagation();
+            state.selectedEdgeIndex = idx;
+            state.activeNodeId = null;
+            document.querySelectorAll('.editor-node').forEach(el => el.classList.remove('editor-node--active'));
+            renderEdgePanel(edge, idx);
+            rebuildAll();
+        });
+
         return g;
+    }
+
+    // ============================================================
+    // LINK MODE
+    // ============================================================
+    function startLinkMode() {
+        if (!state.activeNodeId) return;
+        state.linkFrom = state.activeNodeId;
+        rebuildAll();
+    }
+
+    function completeLink(targetId) {
+        if (!state.linkFrom || state.linkFrom === targetId) {
+            state.linkFrom = null;
+            rebuildAll();
+            return;
+        }
+        const exists = state.edges.some(e => e.from === state.linkFrom && e.to === targetId);
+        if (!exists) {
+            state.edges.push({ from: state.linkFrom, to: targetId, label: '' });
+            saveDraft();
+        }
+        state.linkFrom = null;
+        rebuildAll();
     }
 
     // ============================================================
@@ -297,40 +380,29 @@
         state.dragNode = node;
         state.dragOffset = { x: e.clientX, y: e.clientY };
         state.isDraggingNode = false;
-
         window.addEventListener('mousemove', onNodeDragMove);
         window.addEventListener('mouseup', onNodeDragEnd);
     }
 
     function onNodeDragMove(e) {
         if (!state.dragNode) return;
-
         const dx = e.clientX - state.dragOffset.x;
         const dy = e.clientY - state.dragOffset.y;
-
         if (!state.isDraggingNode) {
             if (Math.abs(dx) < 3 && Math.abs(dy) < 3) return;
             state.isDraggingNode = true;
             stage.style.cursor = 'grabbing';
         }
-
-        const realDx = dx / state.zoom;
-        const realDy = dy / state.zoom;
-
-        state.dragNode.x += realDx;
-        state.dragNode.y += realDy;
-
+        state.dragNode.x += dx / state.zoom;
+        state.dragNode.y += dy / state.zoom;
         state.dragOffset = { x: e.clientX, y: e.clientY };
-
         redraw();
     }
 
     function onNodeDragEnd() {
         if (state.dragNode) {
             saveDraft();
-            if (state.isDraggingNode) {
-                renderPanel(state.dragNode);
-            }
+            if (state.isDraggingNode) renderPanel(state.dragNode);
         }
         state.dragNode = null;
         state.isDraggingNode = false;
@@ -340,109 +412,87 @@
     }
 
     function redraw() {
-        // Пересобираем только позиции — для производительности
         state.nodes.forEach(node => {
             const g = viewportG.querySelector(`[data-node-id="${node.id}"]`);
             if (!g) return;
             const { w, h } = getSize(node.type);
             const isDecision = node.type === 'decision';
-
             const shape = g.querySelector('.editor-node__shape');
             if (isDecision) {
-                const points = [
+                shape.setAttribute('points', [
                     `${node.x},${node.y - h / 2}`,
                     `${node.x + w / 2},${node.y}`,
                     `${node.x},${node.y + h / 2}`,
                     `${node.x - w / 2},${node.y}`
-                ].join(' ');
-                shape.setAttribute('points', points);
+                ].join(' '));
             } else {
                 shape.setAttribute('x', node.x - w / 2);
                 shape.setAttribute('y', node.y - h / 2);
             }
-
             const text = g.querySelector('.editor-node__text');
             text.setAttribute('x', node.x);
             text.setAttribute('y', node.y);
-            text.querySelectorAll('tspan').forEach((tspan, idx, arr) => {
-                tspan.setAttribute('x', node.x);
-                if (idx === 0) tspan.setAttribute('y', node.y);
-            });
+            text.querySelectorAll('tspan').forEach(tspan => tspan.setAttribute('x', node.x));
         });
 
-        // Перерисовываем стрелки (они зависят от позиций)
         viewportG.querySelectorAll('.editor-edge').forEach(g => g.remove());
-        state.edges.forEach(edge => {
-            const g = buildEdge(edge);
+        state.edges.forEach((edge, idx) => {
+            const g = buildEdge(edge, idx);
             viewportG.insertBefore(g, viewportG.firstChild);
         });
     }
 
     // ============================================================
-    // ПАНОРАМА
+    // ПАНОРАМА / ЗУМ
     // ============================================================
     function bindPan() {
-        let raf = null;
-        let pendingX = 0, pendingY = 0;
-
+        let raf = null, px = 0, py = 0;
         stage.addEventListener('mousedown', (e) => {
             if (e.target.closest('.editor-node')) return;
+            if (state.linkFrom) { state.linkFrom = null; rebuildAll(); return; }
             state.isPanning = true;
             state.panStart = { x: e.clientX - state.offsetX, y: e.clientY - state.offsetY };
             stage.style.cursor = 'grabbing';
         });
-
         window.addEventListener('mousemove', (e) => {
             if (!state.isPanning) return;
-            pendingX = e.clientX - state.panStart.x;
-            pendingY = e.clientY - state.panStart.y;
+            px = e.clientX - state.panStart.x;
+            py = e.clientY - state.panStart.y;
             if (raf) return;
             raf = requestAnimationFrame(() => {
                 raf = null;
-                state.offsetX = pendingX;
-                state.offsetY = pendingY;
+                state.offsetX = px;
+                state.offsetY = py;
                 applyTransform();
             });
         });
-
         window.addEventListener('mouseup', () => {
-            if (state.isPanning) {
-                state.isPanning = false;
-                stage.style.cursor = '';
-            }
+            if (state.isPanning) { state.isPanning = false; stage.style.cursor = ''; }
         });
-
         stage.addEventListener('click', (e) => {
             if (e.target.closest('.editor-node')) return;
+            if (e.target.closest('.editor-edge')) return;
             deselect();
         });
     }
 
-    // ============================================================
-    // ЗУМ
-    // ============================================================
     function bindZoom() {
-        let raf = null;
-        let pendingZoom = 1;
-        let pendingX = 0, pendingY = 0;
-
+        let raf = null, pz = 1, px = 0, py = 0;
         stage.addEventListener('wheel', (e) => {
             e.preventDefault();
             const delta = -Math.sign(e.deltaY);
             const factor = delta > 0 ? 1.12 : 0.89;
-            pendingZoom = clamp(state.zoom * factor, state.minZoom, state.maxZoom);
-
+            pz = clamp(state.zoom * factor, state.minZoom, state.maxZoom);
             const rect = stage.getBoundingClientRect();
-            pendingX = e.clientX - rect.left;
-            pendingY = e.clientY - rect.top;
-
+            px = e.clientX - rect.left;
+            py = e.clientY - rect.top;
             if (raf) return;
             raf = requestAnimationFrame(() => {
                 raf = null;
-                const newZoom = pendingZoom;
+                const newZoom = pz;
                 if (newZoom === state.zoom) return;
-                state.offsetX = pendingX - (pendingX - state.offsetX) * (newZoom / state.zoom);
-                state.offsetY = pendingY - (pendingY - state.offsetY) * (newZoom / state.zoom);
+                state.offsetX = px - (px - state.offsetX) * (newZoom / state.zoom);
+                state.offsetY = py - (py - state.offsetY) * (newZoom / state.zoom);
                 state.zoom = newZoom;
                 applyTransform();
             });
@@ -455,19 +505,14 @@
 
     function bindControls() {
         document.getElementById('btnZoomIn')?.addEventListener('click', () => {
-            state.zoom = clamp(state.zoom * 1.2, state.minZoom, state.maxZoom);
-            applyTransform();
+            state.zoom = clamp(state.zoom * 1.2, state.minZoom, state.maxZoom); applyTransform();
         });
         document.getElementById('btnZoomOut')?.addEventListener('click', () => {
-            state.zoom = clamp(state.zoom * 0.83, state.minZoom, state.maxZoom);
-            applyTransform();
+            state.zoom = clamp(state.zoom * 0.83, state.minZoom, state.maxZoom); applyTransform();
         });
         document.getElementById('btnZoomReset')?.addEventListener('click', () => {
-            state.zoom = 1;
-            state.offsetX = 0;
-            state.offsetY = 0;
-            applyTransform();
-            centerView();
+            state.zoom = 1; state.offsetX = 0; state.offsetY = 0;
+            applyTransform(); centerView();
         });
     }
 
@@ -476,22 +521,20 @@
         const stageRect = stage.getBoundingClientRect();
         const canvasW = parseFloat(canvas.style.width) || 1200;
         const canvasH = parseFloat(canvas.style.height) || 1800;
-
-        const scaleX = (stageRect.width - 40) / canvasW;
-        const scaleY = (stageRect.height - 40) / canvasH;
-        state.zoom = clamp(Math.min(scaleX, scaleY), state.minZoom, 1);
+        state.zoom = clamp(Math.min((stageRect.width - 40) / canvasW, (stageRect.height - 40) / canvasH), state.minZoom, 1);
         state.offsetX = (stageRect.width - canvasW * state.zoom) / 2;
         state.offsetY = (stageRect.height - canvasH * state.zoom) / 2;
         applyTransform();
     }
 
     // ============================================================
-    // ПАНЕЛЬ РЕДАКТИРОВАНИЯ
+    // ПАНЕЛЬ УЗЛА
     // ============================================================
     function selectNode(id) {
         const node = state.nodes.find(n => n.id === id);
         if (!node) return;
         state.activeNodeId = id;
+        state.selectedEdgeIndex = -1;
         document.querySelectorAll('.editor-node').forEach(el => el.classList.remove('editor-node--active'));
         document.querySelector(`[data-node-id="${id}"]`)?.classList.add('editor-node--active');
         renderPanel(node);
@@ -499,6 +542,7 @@
 
     function deselect() {
         state.activeNodeId = null;
+        state.selectedEdgeIndex = -1;
         document.querySelectorAll('.editor-node').forEach(el => el.classList.remove('editor-node--active'));
         panel.innerHTML = `
             <div class="editor-panel__empty">
@@ -509,25 +553,17 @@
     }
 
     function renderPanel(node) {
-        const typeLabels = {
-            process:  'Действие',
-            decision: 'Условие',
-            terminal: 'Терминатор',
-            data:     'Данные'
-        };
-
+        const typeLabels = { process: 'Действие', decision: 'Условие', terminal: 'Терминатор', data: 'Данные' };
         panel.innerHTML = `
             <div class="editor-panel__header">
                 <div class="editor-panel__badge editor-panel__badge--${node.type}">${typeLabels[node.type] || ''}</div>
                 <h3 class="editor-panel__title">Редактирование блока</h3>
             </div>
-
             <div class="editor-panel__body">
                 <label class="efield">
                     <span class="efield__label">Текст блока</span>
                     <textarea class="efield__input" id="fLabel" rows="3">${escapeHtml(node.label)}</textarea>
                 </label>
-
                 <label class="efield">
                     <span class="efield__label">Тип блока</span>
                     <select class="efield__input" id="fType">
@@ -536,29 +572,23 @@
                         <option value="terminal" ${node.type === 'terminal' ? 'selected' : ''}>Терминатор (пилюля)</option>
                     </select>
                 </label>
-
                 <div class="editor-panel__divider">Пояснение в панели</div>
-
                 <label class="efield">
                     <span class="efield__label">Заголовок</span>
                     <input class="efield__input" id="fTitle" type="text" value="${escapeAttr(node.tooltip.title)}" placeholder="Оставьте пустым — покажется текст блока">
                 </label>
-
                 <label class="efield">
                     <span class="efield__label">Описание</span>
                     <textarea class="efield__input" id="fDescription" rows="4" placeholder="Что нужно сделать на этом шаге...">${escapeHtml(node.tooltip.description)}</textarea>
                 </label>
-
                 <label class="efield">
                     <span class="efield__label">🎮 Макрос</span>
                     <input class="efield__input" id="fMacro" type="text" value="${escapeAttr(node.tooltip.macro)}" placeholder="Название макроса">
                 </label>
-
                 <label class="efield">
                     <span class="efield__label">📨 Шаблон</span>
                     <input class="efield__input" id="fTemplate" type="text" value="${escapeAttr(node.tooltip.template)}" placeholder="Тип шаблона">
                 </label>
-
                 <label class="efield">
                     <span class="efield__label">📂 Вкладка генератора</span>
                     <select class="efield__input" id="fTab">
@@ -569,14 +599,18 @@
                         <option value="templates" ${node.tooltip.tab === 'templates' ? 'selected' : ''}>📨 Шаблоны</option>
                     </select>
                 </label>
+                <div class="editor-panel__divider">Действия</div>
+                <button class="ebtn ebtn--block" id="btnLinkFrom">🔗 Создать связь из этого блока</button>
+                <button class="ebtn ebtn--block ebtn--danger" id="btnDeleteNode">🗑 Удалить блок</button>
             </div>
-
             <div class="editor-panel__footer">
                 <div class="editor-panel__coords">X: ${Math.round(node.x)} · Y: ${Math.round(node.y)} · ID: <code>${escapeHtml(node.id)}</code></div>
             </div>
         `;
-
         bindPanelInputs(node);
+
+        document.getElementById('btnLinkFrom').addEventListener('click', startLinkMode);
+        document.getElementById('btnDeleteNode').addEventListener('click', () => deleteNode(node.id));
     }
 
     function bindPanelInputs(node) {
@@ -588,19 +622,8 @@
         const fTemplate = document.getElementById('fTemplate');
         const fTab = document.getElementById('fTab');
 
-        fLabel.addEventListener('input', () => {
-            node.label = fLabel.value;
-            updateNodeVisual(node);
-            saveDraft();
-        });
-
-        fType.addEventListener('change', () => {
-            node.type = fType.value;
-            rebuildNodeVisual(node);
-            renderPanel(node);
-            saveDraft();
-        });
-
+        fLabel.addEventListener('input', () => { node.label = fLabel.value; updateNodeVisual(node); saveDraft(); });
+        fType.addEventListener('change', () => { node.type = fType.value; rebuildAll(); selectNode(node.id); saveDraft(); });
         fTitle.addEventListener('input', () => { node.tooltip.title = fTitle.value; saveDraft(); });
         fDescription.addEventListener('input', () => { node.tooltip.description = fDescription.value; saveDraft(); });
         fMacro.addEventListener('input', () => { node.tooltip.macro = fMacro.value; saveDraft(); });
@@ -611,14 +634,11 @@
     function updateNodeVisual(node) {
         const g = viewportG.querySelector(`[data-node-id="${node.id}"]`);
         if (!g) return;
-
         const text = g.querySelector('.editor-node__text');
         const isDecision = node.type === 'decision';
-        const maxChars = isDecision ? 22 : 26;
-        const lines = wrapText(node.label || '', maxChars);
+        const lines = wrapText(node.label || '', isDecision ? 22 : 26);
         const lineHeight = 16;
         const startDy = -((lines.length - 1) * lineHeight) / 2;
-
         text.innerHTML = '';
         lines.forEach((line, idx) => {
             const tspan = document.createElementNS('http://www.w3.org/2000/svg', 'tspan');
@@ -630,27 +650,71 @@
         });
     }
 
-    function rebuildNodeVisual(node) {
-        const old = viewportG.querySelector(`[data-node-id="${node.id}"]`);
-        if (old) old.remove();
-        const newG = buildNode(node);
-        viewportG.appendChild(newG);
-        if (state.activeNodeId === node.id) newG.classList.add('editor-node--active');
-        redraw();
+    function deleteNode(id) {
+        if (!confirm('Удалить этот блок и все его связи?')) return;
+        state.nodes = state.nodes.filter(n => n.id !== id);
+        state.edges = state.edges.filter(e => e.from !== id && e.to !== id);
+        state.activeNodeId = null;
+        rebuildAll();
+        deselect();
+        saveDraft();
+    }
+
+    // ============================================================
+    // ПАНЕЛЬ СВЯЗИ
+    // ============================================================
+    function renderEdgePanel(edge, idx) {
+        const from = state.nodes.find(n => n.id === edge.from);
+        const to = state.nodes.find(n => n.id === edge.to);
+        panel.innerHTML = `
+            <div class="editor-panel__header">
+                <div class="editor-panel__badge">Связь</div>
+                <h3 class="editor-panel__title">Редактирование стрелки</h3>
+            </div>
+            <div class="editor-panel__body">
+                <div class="efield">
+                    <span class="efield__label">Из</span>
+                    <div style="padding:8px 12px;background:rgba(11,22,34,0.4);border-radius:12px;font-size:0.85rem;">${escapeHtml(from?.label || edge.from)}</div>
+                </div>
+                <div class="efield">
+                    <span class="efield__label">В</span>
+                    <div style="padding:8px 12px;background:rgba(11,22,34,0.4);border-radius:12px;font-size:0.85rem;">${escapeHtml(to?.label || edge.to)}</div>
+                </div>
+                <label class="efield">
+                    <span class="efield__label">Подпись (Да / Нет / и т.п.)</span>
+                    <input class="efield__input" id="fEdgeLabel" type="text" value="${escapeAttr(edge.label)}" placeholder="Пусто — без подписи">
+                </label>
+                <div class="editor-panel__divider">Действия</div>
+                <button class="ebtn ebtn--block ebtn--danger" id="btnDeleteEdge">🗑 Удалить связь</button>
+            </div>
+        `;
+        document.getElementById('fEdgeLabel').addEventListener('input', (e) => {
+            edge.label = e.target.value;
+            saveDraft();
+            redraw();
+        });
+        document.getElementById('btnDeleteEdge').addEventListener('click', () => {
+            if (!confirm('Удалить эту связь?')) return;
+            state.edges.splice(idx, 1);
+            state.selectedEdgeIndex = -1;
+            rebuildAll();
+            deselect();
+            saveDraft();
+        });
     }
 
     // ============================================================
     // ЭКСПОРТ
     // ============================================================
     function bindHeader() {
-        document.getElementById('btnDownload').addEventListener('click', downloadAlgorithmJs);
-        document.getElementById('btnResetAll').addEventListener('click', resetAll);
+        document.getElementById('btnDownload')?.addEventListener('click', downloadAlgorithmJs);
+        document.getElementById('btnResetAll')?.addEventListener('click', resetAll);
     }
 
     function downloadAlgorithmJs() {
-        const nodesJs = state.nodes.map(n => {
-            return `        { id: ${JSON.stringify(n.id)}, type: ${JSON.stringify(n.type)}, x: ${Math.round(n.x)}, y: ${Math.round(n.y)},\n          label: ${JSON.stringify(n.label)},\n          tooltip: { title: ${JSON.stringify(n.tooltip.title)}, description: ${JSON.stringify(n.tooltip.description)}, macro: ${JSON.stringify(n.tooltip.macro)}, template: ${JSON.stringify(n.tooltip.template)}, tab: ${JSON.stringify(n.tooltip.tab)} } }`;
-        }).join(',\n\n');
+        const nodesJs = state.nodes.map(n =>
+            `        { id: ${JSON.stringify(n.id)}, type: ${JSON.stringify(n.type)}, x: ${Math.round(n.x)}, y: ${Math.round(n.y)},\n          label: ${JSON.stringify(n.label)},\n          tooltip: { title: ${JSON.stringify(n.tooltip.title)}, description: ${JSON.stringify(n.tooltip.description)}, macro: ${JSON.stringify(n.tooltip.macro)}, template: ${JSON.stringify(n.tooltip.template)}, tab: ${JSON.stringify(n.tooltip.tab)} } }`
+        ).join(',\n\n');
 
         const edgesJs = state.edges.map(e => {
             const parts = [`from: ${JSON.stringify(e.from)}`, `to: ${JSON.stringify(e.to)}`];
@@ -658,388 +722,39 @@
             return `        { ${parts.join(', ')} }`;
         }).join(',\n');
 
-        const content =
-`window.USMS_ALGO = (function () {
+        const content = `window.USMS_ALGO = (function () {
     'use strict';
-
-    const NODE_W = 220;
-    const NODE_H = 72;
-    const DECISION_W = 280;
-    const DECISION_H = 130;
-    const TERMINAL_W = 200;
-    const TERMINAL_H = 60;
-
-    const ALGO_NODES = [
-
-${nodesJs}
-
-    ];
-
-    const ALGO_EDGES = [
-
-${edgesJs}
-
-    ];
-
-    const state = {
-        zoom: 1,
-        minZoom: 0.15,
-        maxZoom: 2.5,
-        offsetX: 0,
-        offsetY: 0,
-        isPanning: false,
-        panStart: { x: 0, y: 0 },
-        activeNodeId: null
-    };
-
+    const NODE_W = 220, NODE_H = 72, DECISION_W = 280, DECISION_H = 130, TERMINAL_W = 200, TERMINAL_H = 60;
+    const ALGO_NODES = [\n\n${nodesJs}\n\n    ];
+    const ALGO_EDGES = [\n\n${edgesJs}\n\n    ];
+    const state = { zoom: 1, minZoom: 0.15, maxZoom: 2.5, offsetX: 0, offsetY: 0, isPanning: false, panStart: { x: 0, y: 0 }, activeNodeId: null };
     let stage, canvas, panel, svgEl, viewportG;
-
-    function init() {
-        stage = document.getElementById('algoStage');
-        canvas = document.getElementById('algoCanvas');
-        panel = document.getElementById('algoPanel');
-        if (!stage || !canvas || !panel) return;
-        buildSvg();
-        bindZoom();
-        bindPan();
-        bindControls();
-        setTimeout(() => centerView(), 30);
-    }
-
-    function buildSvg() {
-        const NS = 'http://www.w3.org/2000/svg';
-        const maxX = Math.max(...ALGO_NODES.map(n => n.x)) + 400;
-        const maxY = Math.max(...ALGO_NODES.map(n => n.y)) + 300;
-        canvas.style.width = maxX + 'px';
-        canvas.style.height = maxY + 'px';
-        svgEl = document.createElementNS(NS, 'svg');
-        svgEl.setAttribute('width', maxX);
-        svgEl.setAttribute('height', maxY);
-        svgEl.setAttribute('viewBox', '0 0 ' + maxX + ' ' + maxY);
-        svgEl.classList.add('algo-svg');
-        const defs = document.createElementNS(NS, 'defs');
-        const marker = document.createElementNS(NS, 'marker');
-        marker.setAttribute('id', 'algoArrow');
-        marker.setAttribute('viewBox', '0 0 10 10');
-        marker.setAttribute('refX', '9');
-        marker.setAttribute('refY', '5');
-        marker.setAttribute('markerWidth', '6');
-        marker.setAttribute('markerHeight', '6');
-        marker.setAttribute('orient', 'auto-start-reverse');
-        const arrowPath = document.createElementNS(NS, 'path');
-        arrowPath.setAttribute('d', 'M 0 0 L 10 5 L 0 10 z');
-        arrowPath.setAttribute('fill', 'rgba(139, 176, 204, 0.55)');
-        marker.appendChild(arrowPath);
-        defs.appendChild(marker);
-        svgEl.appendChild(defs);
-        viewportG = document.createElementNS(NS, 'g');
-        viewportG.setAttribute('id', 'algoViewport');
-        svgEl.appendChild(viewportG);
-        ALGO_EDGES.forEach(edge => viewportG.appendChild(buildEdge(edge)));
-        ALGO_NODES.forEach(node => viewportG.appendChild(buildNode(node)));
-        canvas.appendChild(svgEl);
-    }
-
-    function getNodeSize(node) {
-        if (node.type === 'decision') return { w: DECISION_W, h: DECISION_H };
-        if (node.type === 'terminal') return { w: TERMINAL_W, h: TERMINAL_H };
-        return { w: NODE_W, h: NODE_H };
-    }
-
-    function buildNode(node) {
-        const NS = 'http://www.w3.org/2000/svg';
-        const g = document.createElementNS(NS, 'g');
-        g.setAttribute('class', 'algo-node algo-node--' + node.type);
-        g.setAttribute('data-node-id', node.id);
-        g.style.cursor = 'pointer';
-        const { w, h } = getNodeSize(node);
-        const isDecision = node.type === 'decision';
-        const isTerminal = node.type === 'terminal';
-        let shape;
-        if (isDecision) {
-            const points = [
-                node.x + ',' + (node.y - h / 2),
-                (node.x + w / 2) + ',' + node.y,
-                node.x + ',' + (node.y + h / 2),
-                (node.x - w / 2) + ',' + node.y
-            ].join(' ');
-            shape = document.createElementNS(NS, 'polygon');
-            shape.setAttribute('points', points);
-        } else {
-            shape = document.createElementNS(NS, 'rect');
-            shape.setAttribute('x', node.x - w / 2);
-            shape.setAttribute('y', node.y - h / 2);
-            shape.setAttribute('width', w);
-            shape.setAttribute('height', h);
-            shape.setAttribute('rx', isTerminal ? h / 2 : 14);
-            shape.setAttribute('ry', isTerminal ? h / 2 : 14);
-        }
-        shape.setAttribute('class', 'algo-node__shape');
-        g.appendChild(shape);
-        const text = document.createElementNS(NS, 'text');
-        text.setAttribute('x', node.x);
-        text.setAttribute('y', node.y);
-        text.setAttribute('text-anchor', 'middle');
-        text.setAttribute('class', 'algo-node__text');
-        const maxChars = isDecision ? 22 : 26;
-        const lines = wrapText(node.label, maxChars);
-        const lineHeight = 16;
-        const startDy = -((lines.length - 1) * lineHeight) / 2;
-        lines.forEach((line, idx) => {
-            const tspan = document.createElementNS(NS, 'tspan');
-            tspan.setAttribute('x', node.x);
-            tspan.setAttribute('dy', idx === 0 ? startDy : lineHeight);
-            if (idx === 0) tspan.setAttribute('y', node.y);
-            tspan.textContent = line;
-            text.appendChild(tspan);
-        });
-        g.appendChild(text);
-        g.addEventListener('click', (e) => {
-            e.stopPropagation();
-            selectNode(node.id);
-        });
-        return g;
-    }
-
-    function wrapText(text, maxChars) {
-        const words = String(text).split(/\\s+/);
-        const lines = [];
-        let current = '';
-        words.forEach(word => {
-            const test = current ? current + ' ' + word : word;
-            if (test.length > maxChars && current) {
-                lines.push(current);
-                current = word;
-            } else {
-                current = test;
-            }
-        });
-        if (current) lines.push(current);
-        return lines.length ? lines : [''];
-    }
-
-    function buildEdge(edge) {
-        const NS = 'http://www.w3.org/2000/svg';
-        const g = document.createElementNS(NS, 'g');
-        g.setAttribute('class', 'algo-edge');
-        const from = ALGO_NODES.find(n => n.id === edge.from);
-        const to = ALGO_NODES.find(n => n.id === edge.to);
-        if (!from || !to) return g;
-        const fromSize = getNodeSize(from);
-        const toSize = getNodeSize(to);
-        const x1 = from.x;
-        const y1 = from.y + fromSize.h / 2;
-        const x2 = to.x;
-        const y2 = to.y - toSize.h / 2;
-        let d;
-        if (Math.abs(x2 - x1) < 5) {
-            d = 'M ' + x1 + ' ' + y1 + ' L ' + x2 + ' ' + y2;
-        } else {
-            const midY = y1 + (y2 - y1) / 2;
-            d = 'M ' + x1 + ' ' + y1 + ' L ' + x1 + ' ' + midY + ' L ' + x2 + ' ' + midY + ' L ' + x2 + ' ' + y2;
-        }
-        const path = document.createElementNS(NS, 'path');
-        path.setAttribute('d', d);
-        path.setAttribute('class', 'algo-edge__line');
-        path.setAttribute('marker-end', 'url(#algoArrow)');
-        g.appendChild(path);
-        if (edge.label) {
-            const mx = (x1 + x2) / 2;
-            const my = (y1 + y2) / 2;
-            const labelW = Math.max(40, edge.label.length * 7 + 12);
-            const rect = document.createElementNS(NS, 'rect');
-            rect.setAttribute('x', mx - labelW / 2);
-            rect.setAttribute('y', my - 10);
-            rect.setAttribute('width', labelW);
-            rect.setAttribute('height', 20);
-            rect.setAttribute('rx', 6);
-            rect.setAttribute('class', 'algo-edge__label-bg');
-            g.appendChild(rect);
-            const lbl = document.createElementNS(NS, 'text');
-            lbl.setAttribute('x', mx);
-            lbl.setAttribute('y', my + 4);
-            lbl.setAttribute('text-anchor', 'middle');
-            lbl.setAttribute('class', 'algo-edge__label');
-            lbl.textContent = edge.label;
-            g.appendChild(lbl);
-        }
-        return g;
-    }
-
-    function bindZoom() {
-        let raf = null;
-        let pendingZoom = 1;
-        let pendingX = 0, pendingY = 0;
-        stage.addEventListener('wheel', (e) => {
-            e.preventDefault();
-            const delta = -Math.sign(e.deltaY);
-            const factor = delta > 0 ? 1.12 : 0.89;
-            pendingZoom = clamp(state.zoom * factor, state.minZoom, state.maxZoom);
-            const rect = stage.getBoundingClientRect();
-            pendingX = e.clientX - rect.left;
-            pendingY = e.clientY - rect.top;
-            if (raf) return;
-            raf = requestAnimationFrame(() => {
-                raf = null;
-                const newZoom = pendingZoom;
-                if (newZoom === state.zoom) return;
-                state.offsetX = pendingX - (pendingX - state.offsetX) * (newZoom / state.zoom);
-                state.offsetY = pendingY - (pendingY - state.offsetY) * (newZoom / state.zoom);
-                state.zoom = newZoom;
-                applyTransform();
-            });
-        }, { passive: false });
-    }
-
-    function applyTransform() {
-        canvas.style.transform = 'translate(' + state.offsetX + 'px, ' + state.offsetY + 'px) scale(' + state.zoom + ')';
-        canvas.style.transformOrigin = '0 0';
-    }
-
-    function bindControls() {
-        document.getElementById('algoZoomIn')?.addEventListener('click', () => {
-            state.zoom = clamp(state.zoom * 1.2, state.minZoom, state.maxZoom);
-            applyTransform();
-        });
-        document.getElementById('algoZoomOut')?.addEventListener('click', () => {
-            state.zoom = clamp(state.zoom * 0.83, state.minZoom, state.maxZoom);
-            applyTransform();
-        });
-        document.getElementById('algoZoomReset')?.addEventListener('click', () => {
-            state.zoom = 1;
-            state.offsetX = 0;
-            state.offsetY = 0;
-            applyTransform();
-            centerView();
-        });
-    }
-
-    function bindPan() {
-        let raf = null;
-        let pendingX = 0, pendingY = 0;
-        stage.addEventListener('mousedown', (e) => {
-            if (e.target.closest('.algo-node')) return;
-            state.isPanning = true;
-            state.panStart = { x: e.clientX - state.offsetX, y: e.clientY - state.offsetY };
-            stage.style.cursor = 'grabbing';
-        });
-        window.addEventListener('mousemove', (e) => {
-            if (!state.isPanning) return;
-            pendingX = e.clientX - state.panStart.x;
-            pendingY = e.clientY - state.panStart.y;
-            if (raf) return;
-            raf = requestAnimationFrame(() => {
-                raf = null;
-                state.offsetX = pendingX;
-                state.offsetY = pendingY;
-                applyTransform();
-            });
-        });
-        window.addEventListener('mouseup', () => {
-            if (state.isPanning) {
-                state.isPanning = false;
-                stage.style.cursor = '';
-            }
-        });
-        stage.addEventListener('click', (e) => {
-            if (e.target.closest('.algo-node')) return;
-            deselectNode();
-        });
-    }
-
-    function centerView() {
-        if (!stage || !canvas) return;
-        const stageRect = stage.getBoundingClientRect();
-        const canvasW = parseFloat(canvas.style.width) || 1200;
-        const canvasH = parseFloat(canvas.style.height) || 1800;
-        const scaleX = (stageRect.width - 40) / canvasW;
-        const scaleY = (stageRect.height - 40) / canvasH;
-        const fitZoom = clamp(Math.min(scaleX, scaleY), state.minZoom, 1);
-        state.zoom = fitZoom;
-        state.offsetX = (stageRect.width - canvasW * state.zoom) / 2;
-        state.offsetY = (stageRect.height - canvasH * state.zoom) / 2;
-        applyTransform();
-    }
-
-    function selectNode(nodeId) {
-        const node = ALGO_NODES.find(n => n.id === nodeId);
-        if (!node) return;
-        state.activeNodeId = nodeId;
-        document.querySelectorAll('.algo-node').forEach(el => el.classList.remove('algo-node--active'));
-        document.querySelector('[data-node-id="' + nodeId + '"]')?.classList.add('algo-node--active');
-        renderPanel(node);
-    }
-
-    function deselectNode() {
-        state.activeNodeId = null;
-        document.querySelectorAll('.algo-node').forEach(el => el.classList.remove('algo-node--active'));
-        panel.innerHTML = '<div class="algo-panel__empty"><div class="algo-panel__empty-icon">📋</div><div class="algo-panel__empty-text">Кликните по блоку схемы, чтобы увидеть пояснение</div></div>';
-    }
-
-    function renderPanel(node) {
-        const t = node.tooltip || {};
-        const badge = {
-            terminal: 'Терминатор',
-            process:  'Действие',
-            decision: 'Условие',
-            data:     'Данные'
-        }[node.type] || '';
-        let extras = '';
-        if (t.macro) {
-            extras += '<div class="algo-panel__row"><div class="algo-panel__row-label">🎮 Макрос</div><div class="algo-panel__row-value">' + escapeHtml(t.macro) + '</div></div>';
-        }
-        if (t.template) {
-            extras += '<div class="algo-panel__row"><div class="algo-panel__row-label">📨 Шаблон</div><div class="algo-panel__row-value">' + escapeHtml(t.template) + '</div></div>';
-        }
-        if (t.tab) {
-            const tabLabel = {
-                decree: '📜 Постановление',
-                wanted: '🔍 Розыск',
-                final: '📋 Итоговое',
-                templates: '📨 Шаблоны'
-            }[t.tab] || t.tab;
-            extras += '<div class="algo-panel__row"><div class="algo-panel__row-label">📂 Вкладка</div><div class="algo-panel__row-value">' + tabLabel + '</div></div>';
-        }
-        panel.innerHTML =
-            '<div class="algo-panel__header"><div class="algo-panel__badge algo-panel__badge--' + node.type + '">' + badge + '</div><h3 class="algo-panel__title">' + escapeHtml(t.title || node.label) + '</h3></div>' +
-            '<div class="algo-panel__body"><p class="algo-panel__desc">' + escapeHtml(t.description || 'Описание не задано.') + '</p>' + extras + '</div>' +
-            '<div class="algo-panel__footer"><button class="btn btn--primary btn--block" id="algoGotoBtn" ' + (t.tab ? '' : 'disabled') + '>➡️ Открыть в генераторе</button></div>';
-        const gotoBtn = document.getElementById('algoGotoBtn');
-        if (gotoBtn && t.tab) {
-            gotoBtn.addEventListener('click', () => {
-                const tabBtn = document.querySelector('.tabs__btn[data-tab="' + t.tab + '"]');
-                if (tabBtn) tabBtn.click();
-            });
-        }
-    }
-
-    function clamp(v, min, max) {
-        return Math.max(min, Math.min(max, v));
-    }
-
-    function escapeHtml(str) {
-        return String(str)
-            .replace(/&/g, '&amp;')
-            .replace(/</g, '&lt;')
-            .replace(/>/g, '&gt;')
-            .replace(/"/g, '&quot;')
-            .replace(/'/g, '&#39;');
-    }
-
-    return { init, selectNode, deselectNode };
+    function init() { stage = document.getElementById('algoStage'); canvas = document.getElementById('algoCanvas'); panel = document.getElementById('algoPanel'); if (!stage || !canvas || !panel) return; buildSvg(); bindZoom(); bindPan(); bindControls(); setTimeout(() => centerView(), 30); }
+    function buildSvg() { const NS='http://www.w3.org/2000/svg'; const maxX=Math.max(...ALGO_NODES.map(n=>n.x))+400; const maxY=Math.max(...ALGO_NODES.map(n=>n.y))+300; canvas.style.width=maxX+'px'; canvas.style.height=maxY+'px'; svgEl=document.createElementNS(NS,'svg'); svgEl.setAttribute('width',maxX); svgEl.setAttribute('height',maxY); svgEl.setAttribute('viewBox','0 0 '+maxX+' '+maxY); svgEl.classList.add('algo-svg'); const defs=document.createElementNS(NS,'defs'); const marker=document.createElementNS(NS,'marker'); marker.setAttribute('id','algoArrow'); marker.setAttribute('viewBox','0 0 10 10'); marker.setAttribute('refX','9'); marker.setAttribute('refY','5'); marker.setAttribute('markerWidth','6'); marker.setAttribute('markerHeight','6'); marker.setAttribute('orient','auto-start-reverse'); const arrowPath=document.createElementNS(NS,'path'); arrowPath.setAttribute('d','M 0 0 L 10 5 L 0 10 z'); arrowPath.setAttribute('fill','rgba(139, 176, 204, 0.55)'); marker.appendChild(arrowPath); defs.appendChild(marker); svgEl.appendChild(defs); viewportG=document.createElementNS(NS,'g'); svgEl.appendChild(viewportG); ALGO_EDGES.forEach(edge=>viewportG.appendChild(buildEdge(edge))); ALGO_NODES.forEach(node=>viewportG.appendChild(buildNode(node))); canvas.appendChild(svgEl); }
+    function getNodeSize(n) { if (n.type==='decision') return { w: DECISION_W, h: DECISION_H }; if (n.type==='terminal') return { w: TERMINAL_W, h: TERMINAL_H }; return { w: NODE_W, h: NODE_H }; }
+    function buildNode(node) { const NS='http://www.w3.org/2000/svg'; const g=document.createElementNS(NS,'g'); g.setAttribute('class','algo-node algo-node--'+node.type); g.setAttribute('data-node-id',node.id); g.style.cursor='pointer'; const { w, h }=getNodeSize(node); const isD=node.type==='decision'; const isT=node.type==='terminal'; let shape; if (isD) { shape=document.createElementNS(NS,'polygon'); shape.setAttribute('points',[node.x+','+(node.y-h/2),(node.x+w/2)+','+node.y,node.x+','+(node.y+h/2),(node.x-w/2)+','+node.y].join(' ')); } else { shape=document.createElementNS(NS,'rect'); shape.setAttribute('x',node.x-w/2); shape.setAttribute('y',node.y-h/2); shape.setAttribute('width',w); shape.setAttribute('height',h); shape.setAttribute('rx',isT?h/2:14); shape.setAttribute('ry',isT?h/2:14); } shape.setAttribute('class','algo-node__shape'); g.appendChild(shape); const text=document.createElementNS(NS,'text'); text.setAttribute('x',node.x); text.setAttribute('y',node.y); text.setAttribute('text-anchor','middle'); text.setAttribute('class','algo-node__text'); const lines=wrapText(node.label,isD?22:26); const lh=16; const sd=-((lines.length-1)*lh)/2; lines.forEach((line,idx)=>{ const t=document.createElementNS(NS,'tspan'); t.setAttribute('x',node.x); t.setAttribute('dy',idx===0?sd:lh); if(idx===0) t.setAttribute('y',node.y); t.textContent=line; text.appendChild(t); }); g.appendChild(text); g.addEventListener('click',e=>{e.stopPropagation();selectNode(node.id);}); return g; }
+    function wrapText(text,max){ const words=String(text).split(/\\s+/); const lines=[]; let cur=''; words.forEach(w=>{ const t=cur?cur+' '+w:w; if(t.length>max&&cur){lines.push(cur);cur=w;}else{cur=t;} }); if(cur)lines.push(cur); return lines.length?lines:['']; }
+    function buildEdge(edge) { const NS='http://www.w3.org/2000/svg'; const g=document.createElementNS(NS,'g'); g.setAttribute('class','algo-edge'); const from=ALGO_NODES.find(n=>n.id===edge.from); const to=ALGO_NODES.find(n=>n.id===edge.to); if(!from||!to) return g; const fs=getNodeSize(from); const ts=getNodeSize(to); const x1=from.x; const y1=from.y+fs.h/2; const x2=to.x; const y2=to.y-ts.h/2; let d; if(Math.abs(x2-x1)<5){d='M '+x1+' '+y1+' L '+x2+' '+y2;}else{const my=y1+(y2-y1)/2; d='M '+x1+' '+y1+' L '+x1+' '+my+' L '+x2+' '+my+' L '+x2+' '+y2;} const p=document.createElementNS(NS,'path'); p.setAttribute('d',d); p.setAttribute('class','algo-edge__line'); p.setAttribute('marker-end','url(#algoArrow)'); g.appendChild(p); if(edge.label){ const mx=(x1+x2)/2; const my=(y1+y2)/2; const lw=Math.max(40,edge.label.length*7+12); const r=document.createElementNS(NS,'rect'); r.setAttribute('x',mx-lw/2); r.setAttribute('y',my-10); r.setAttribute('width',lw); r.setAttribute('height',20); r.setAttribute('rx',6); r.setAttribute('class','algo-edge__label-bg'); g.appendChild(r); const lb=document.createElementNS(NS,'text'); lb.setAttribute('x',mx); lb.setAttribute('y',my+4); lb.setAttribute('text-anchor','middle'); lb.setAttribute('class','algo-edge__label'); lb.textContent=edge.label; g.appendChild(lb); } return g; }
+    function bindZoom() { let raf=null,pz=1,px=0,py=0; stage.addEventListener('wheel',e=>{e.preventDefault(); const d=-Math.sign(e.deltaY); const f=d>0?1.12:0.89; pz=clamp(state.zoom*f,state.minZoom,state.maxZoom); const r=stage.getBoundingClientRect(); px=e.clientX-r.left; py=e.clientY-r.top; if(raf)return; raf=requestAnimationFrame(()=>{raf=null; const nz=pz; if(nz===state.zoom)return; state.offsetX=px-(px-state.offsetX)*(nz/state.zoom); state.offsetY=py-(py-state.offsetY)*(nz/state.zoom); state.zoom=nz; applyTransform();});},{passive:false}); }
+    function applyTransform() { canvas.style.transform='translate('+state.offsetX+'px, '+state.offsetY+'px) scale('+state.zoom+')'; canvas.style.transformOrigin='0 0'; }
+    function bindControls() { document.getElementById('algoZoomIn')?.addEventListener('click',()=>{state.zoom=clamp(state.zoom*1.2,state.minZoom,state.maxZoom);applyTransform();}); document.getElementById('algoZoomOut')?.addEventListener('click',()=>{state.zoom=clamp(state.zoom*0.83,state.minZoom,state.maxZoom);applyTransform();}); document.getElementById('algoZoomReset')?.addEventListener('click',()=>{state.zoom=1;state.offsetX=0;state.offsetY=0;applyTransform();centerView();}); }
+    function bindPan() { let raf=null,px=0,py=0; stage.addEventListener('mousedown',e=>{ if(e.target.closest('.algo-node')) return; state.isPanning=true; state.panStart={x:e.clientX-state.offsetX,y:e.clientY-state.offsetY}; stage.style.cursor='grabbing'; }); window.addEventListener('mousemove',e=>{ if(!state.isPanning)return; px=e.clientX-state.panStart.x; py=e.clientY-state.panStart.y; if(raf)return; raf=requestAnimationFrame(()=>{raf=null;state.offsetX=px;state.offsetY=py;applyTransform();}); }); window.addEventListener('mouseup',()=>{ if(state.isPanning){state.isPanning=false;stage.style.cursor='';} }); stage.addEventListener('click',e=>{ if(e.target.closest('.algo-node'))return; deselectNode(); }); }
+    function centerView() { if(!stage||!canvas)return; const sr=stage.getBoundingClientRect(); const cw=parseFloat(canvas.style.width)||1200; const ch=parseFloat(canvas.style.height)||1800; const sz=clamp(Math.min((sr.width-40)/cw,(sr.height-40)/ch),state.minZoom,1); state.zoom=sz; state.offsetX=(sr.width-cw*state.zoom)/2; state.offsetY=(sr.height-ch*state.zoom)/2; applyTransform(); }
+    function selectNode(id) { const node=ALGO_NODES.find(n=>n.id===id); if(!node)return; state.activeNodeId=id; document.querySelectorAll('.algo-node').forEach(el=>el.classList.remove('algo-node--active')); document.querySelector('[data-node-id="'+id+'"]')?.classList.add('algo-node--active'); renderPanel(node); }
+    function deselectNode() { state.activeNodeId=null; document.querySelectorAll('.algo-node').forEach(el=>el.classList.remove('algo-node--active')); panel.innerHTML='<div class="algo-panel__empty"><div class="algo-panel__empty-icon">📋</div><div class="algo-panel__empty-text">Кликните по блоку, чтобы увидеть пояснение</div></div>'; }
+    function renderPanel(node) { const t=node.tooltip||{}; const badge={terminal:'Терминатор',process:'Действие',decision:'Условие',data:'Данные'}[node.type]||''; let ex=''; if(t.macro) ex+='<div class="algo-panel__row"><div class="algo-panel__row-label">🎮 Макрос</div><div class="algo-panel__row-value">'+escapeHtml(t.macro)+'</div></div>'; if(t.template) ex+='<div class="algo-panel__row"><div class="algo-panel__row-label">📨 Шаблон</div><div class="algo-panel__row-value">'+escapeHtml(t.template)+'</div></div>'; if(t.tab){const tl={decree:'📜 Постановление',wanted:'🔍 Розыск',final:'📋 Итоговое',templates:'📨 Шаблоны'}[t.tab]||t.tab; ex+='<div class="algo-panel__row"><div class="algo-panel__row-label">📂 Вкладка</div><div class="algo-panel__row-value">'+tl+'</div></div>';} panel.innerHTML='<div class="algo-panel__header"><div class="algo-panel__badge algo-panel__badge--'+node.type+'">'+badge+'</div><h3 class="algo-panel__title">'+escapeHtml(t.title||node.label)+'</h3></div><div class="algo-panel__body"><p class="algo-panel__desc">'+escapeHtml(t.description||'Описание не задано.')+'</p>'+ex+'</div><div class="algo-panel__footer"><button class="btn btn--primary btn--block" id="algoGotoBtn" '+(t.tab?'':'disabled')+'>➡️ Открыть в генераторе</button></div>'; const gb=document.getElementById('algoGotoBtn'); if(gb&&t.tab){ gb.addEventListener('click',()=>{ const tb=document.querySelector('.tabs__btn[data-tab="'+t.tab+'"]'); if(tb)tb.click(); }); } }
+    function clamp(v,min,max){return Math.max(min,Math.min(max,v));}
+    function escapeHtml(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
+    return { init, selectNode, deselectNode, ALGO_NODES, ALGO_EDGES };
 })();
 `;
 
         const blob = new Blob([content], { type: 'application/javascript;charset=utf-8' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
-        a.href = url;
-        a.download = 'algorithm.js';
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
+        a.href = url; a.download = 'algorithm.js';
+        document.body.appendChild(a); a.click(); document.body.removeChild(a);
         URL.revokeObjectURL(url);
-
         showSaveToast();
     }
 
@@ -1049,10 +764,7 @@ ${edgesJs}
         t.innerHTML = '✅ <b>algorithm.js</b> скачан. Замените файл в проекте на новый.';
         document.body.appendChild(t);
         requestAnimationFrame(() => t.classList.add('editor-toast--show'));
-        setTimeout(() => {
-            t.classList.remove('editor-toast--show');
-            setTimeout(() => t.remove(), 300);
-        }, 3500);
+        setTimeout(() => { t.classList.remove('editor-toast--show'); setTimeout(() => t.remove(), 300); }, 3500);
     }
 
     function resetAll() {
@@ -1061,29 +773,21 @@ ${edgesJs}
         location.reload();
     }
 
-    // ============================================================
-    // ХЕЛПЕРЫ
-    // ============================================================
-    function clamp(v, min, max) {
-        return Math.max(min, Math.min(max, v));
+    function bindHotkeys() {
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                if (state.linkFrom) { state.linkFrom = null; rebuildAll(); }
+                else deselect();
+            }
+            if ((e.key === 'Delete' || e.key === 'Backspace') && state.activeNodeId && document.activeElement.tagName !== 'INPUT' && document.activeElement.tagName !== 'TEXTAREA') {
+                deleteNode(state.activeNodeId);
+            }
+        });
     }
 
-    function escapeHtml(str) {
-        return String(str || '')
-            .replace(/&/g, '&amp;')
-            .replace(/</g, '&lt;')
-            .replace(/>/g, '&gt;')
-            .replace(/"/g, '&quot;')
-            .replace(/'/g, '&#39;');
-    }
-
-    function escapeAttr(str) {
-        return String(str || '')
-            .replace(/&/g, '&amp;')
-            .replace(/"/g, '&quot;')
-            .replace(/</g, '&lt;')
-            .replace(/>/g, '&gt;');
-    }
+    function clamp(v, min, max) { return Math.max(min, Math.min(max, v)); }
+    function escapeHtml(s) { return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
+    function escapeAttr(s) { return String(s || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
 
     init();
 })();
