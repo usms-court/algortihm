@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Редактор алгоритма — USMS</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@700&family=Inter:wght@400;500;600&family=Rajdhani:wght@600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="editor-style.css">
+</head>
+<body>
+
+    <div class="editor" id="editorApp">
+        
+        <header class="editor-header">
+            <div class="editor-header__title">
+                <h1>🧭 Редактор алгоритма</h1>
+                <p class="editor-header__sub">Кликните по блоку для редактирования · Тащите мышью для перемещения</p>
+            </div>
+            <div class="editor-header__actions">
+                <button class="ebtn ebtn--ghost" id="btnDownload" title="Скачать готовый algorithm.js">💾 Скачать algorithm.js</button>
+                <button class="ebtn ebtn--ghost" id="btnResetAll" title="Сбросить все изменения и загрузить заново из algorithm.js">↺ Сбросить всё</button>
+            </div>
+        </header>
+
+        <div class="editor-body">
+            
+            <div class="editor-stage" id="algoStage">
+                <div class="editor-canvas" id="algoCanvas"></div>
+                <div class="editor-controls">
+                    <button class="editor-ctrl" id="btnZoomIn" title="Приблизить">+</button>
+                    <button class="editor-ctrl" id="btnZoomOut" title="Отдалить">−</button>
+                    <button class="editor-ctrl" id="btnZoomReset" title="Сбросить масштаб">⤢</button>
+                </div>
+                <div class="editor-hint">🖱️ Колесо — масштаб · ЛКМ по пустому — панорама · ЛКМ по блоку — перемещение</div>
+            </div>
+
+            <aside class="editor-panel" id="editorPanel">
+                <div class="editor-panel__empty">
+                    <div class="editor-panel__empty-icon">📋</div>
+                    <div class="editor-panel__empty-text">Кликните по блоку, чтобы отредактировать</div>
+                </div>
+            </aside>
+
+        </div>
+
+    </div>
+
+    <script src="algorithm.js"></script>
+    <script src="editor.js"></script>
+</body>
+</html>
