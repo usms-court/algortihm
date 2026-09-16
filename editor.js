@@ -20,6 +20,13 @@
         selectedEdgeIndex: -1
     };
 
+    const history = {
+        past: [],
+        future: [],
+        maxSize: 50,
+        isRestoring: false
+    };
+
     const MIN_W = 120;
     const MAX_W = 400;
     const PAD_X = 28;
@@ -31,6 +38,7 @@
     const STORAGE_KEY = 'usms_algo_editor_draft_v2';
 
     let stage, canvas, panel, svgEl, viewportG, linkHint;
+    let btnUndo, btnRedo;
 
     // ============================================================
     // ЗАГРУЗКА / СОХРАНЕНИЕ
@@ -81,29 +89,92 @@
     }
 
     // ============================================================
+    // ИСТОРИЯ (UNDO / REDO)
+    // ============================================================
+    function snapshot() {
+        return JSON.stringify({
+            nodes: state.nodes,
+            edges: state.edges
+        });
+    }
+
+    function pushHistory() {
+        if (history.isRestoring) return;
+        const snap = snapshot();
+        const last = history.past[history.past.length - 1];
+        if (last === snap) return;
+        history.past.push(snap);
+        if (history.past.length > history.maxSize) history.past.shift();
+        history.future.length = 0;
+        updateHistoryButtons();
+    }
+
+    function undo() {
+        if (!history.past.length) return;
+        const current = snapshot();
+        history.future.push(current);
+        const prev = history.past.pop();
+        restoreSnapshot(prev);
+        updateHistoryButtons();
+    }
+
+    function redo() {
+        if (!history.future.length) return;
+        const current = snapshot();
+        history.past.push(current);
+        const next = history.future.pop();
+        restoreSnapshot(next);
+        updateHistoryButtons();
+    }
+
+    function restoreSnapshot(snap) {
+        history.isRestoring = true;
+        try {
+            const data = JSON.parse(snap);
+            state.nodes = data.nodes;
+            state.edges = data.edges;
+            rebuildAll();
+            saveDraft();
+            if (state.activeNodeId) {
+                const stillExists = state.nodes.find(n => n.id === state.activeNodeId);
+                if (stillExists) {
+                    selectNode(state.activeNodeId);
+                } else {
+                    deselect();
+                }
+            } else {
+                deselect();
+            }
+        } catch (e) {
+            console.warn('Не удалось восстановить состояние', e);
+        }
+        history.isRestoring = false;
+    }
+
+    function updateHistoryButtons() {
+        if (btnUndo) btnUndo.disabled = !history.past.length;
+        if (btnRedo) btnRedo.disabled = !history.future.length;
+    }
+
+    // ============================================================
     // ВЫЧИСЛЕНИЕ РАЗМЕРА ПО ТЕКСТУ
     // ============================================================
     function computeNodeSize(node) {
         const label = node.label || '';
         const isDecision = node.type === 'decision';
 
-        // Подбираем ширину от MIN_W до MAX_W
-        let width = MIN_W;
         const words = label.split(/\s+/);
         let longest = 0;
         words.forEach(w => { if (w.length > longest) longest = w.length; });
 
-        // Не даём словам быть шире, чем MAX_W - PAD_X*2
         const minWidthForLongest = longest * CHAR_W + PAD_X * 2;
-        width = Math.max(MIN_W, Math.min(MAX_W, Math.max(minWidthForLongest, label.length * CHAR_W * 0.5 + PAD_X * 2)));
+        let width = Math.max(MIN_W, Math.min(MAX_W, Math.max(minWidthForLongest, label.length * CHAR_W * 0.5 + PAD_X * 2)));
 
-        // Рассчитываем, сколько строк влезет
         const maxCharsPerLine = Math.floor((width - PAD_X * 2) / CHAR_W);
         const lines = wrapText(label, maxCharsPerLine);
         let height = lines.length * LINE_H + PAD_Y * 2;
         height = Math.max(MIN_H, height);
 
-        // Ромб — должен быть крупнее
         if (isDecision) {
             width = Math.max(width * 1.15, 200);
             height = Math.max(height * 1.6, 100);
@@ -150,6 +221,7 @@
         bindControls();
         bindHeader();
         bindHotkeys();
+        updateHistoryButtons();
         setTimeout(() => centerView(), 30);
     }
 
@@ -160,11 +232,25 @@
         const header = document.querySelector('.editor-header__actions');
         if (!header) return;
 
+        btnUndo = document.createElement('button');
+        btnUndo.className = 'ebtn ebtn--icon';
+        btnUndo.title = 'Отменить (Ctrl+Z)';
+        btnUndo.textContent = '↶';
+        btnUndo.disabled = true;
+        header.insertBefore(btnUndo, header.firstChild);
+
+        btnRedo = document.createElement('button');
+        btnRedo.className = 'ebtn ebtn--icon';
+        btnRedo.title = 'Повторить (Ctrl+Y)';
+        btnRedo.textContent = '↷';
+        btnRedo.disabled = true;
+        header.insertBefore(btnRedo, btnUndo.nextSibling);
+
         const addBtn = document.createElement('button');
         addBtn.className = 'ebtn ebtn--primary';
         addBtn.id = 'btnAddNode';
         addBtn.textContent = '➕ Добавить блок';
-        header.insertBefore(addBtn, header.firstChild);
+        header.insertBefore(addBtn, btnRedo.nextSibling);
 
         const linkBtn = document.createElement('button');
         linkBtn.className = 'ebtn';
@@ -172,7 +258,11 @@
         linkBtn.textContent = '🔗 Связь';
         header.insertBefore(linkBtn, addBtn.nextSibling);
 
+        btnUndo.addEventListener('click', () => undo());
+        btnRedo.addEventListener('click', () => redo());
+
         addBtn.addEventListener('click', () => {
+            pushHistory();
             const id = 'node_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6);
             const newNode = {
                 id,
@@ -241,6 +331,7 @@
 
         const exists = state.edges.some(e => e.from === state.linkFrom && e.to === nodeId);
         if (!exists) {
+            pushHistory();
             state.edges.push({ from: state.linkFrom, to: nodeId, label: '' });
             saveDraft();
         }
@@ -358,9 +449,7 @@
         g.addEventListener('click', (e) => {
             e.stopPropagation();
             if (state.isDraggingNode) return;
-
             if (state.linkMode && handleLinkClick(node.id)) return;
-
             selectNode(node.id);
         });
 
@@ -452,6 +541,7 @@
         state.dragNode = node;
         state.dragOffset = { x: e.clientX, y: e.clientY };
         state.isDraggingNode = false;
+        state.dragStartSnapshot = snapshot();
         window.addEventListener('mousemove', onNodeDragMove);
         window.addEventListener('mouseup', onNodeDragEnd);
     }
@@ -472,23 +562,28 @@
     }
 
     function onNodeDragEnd() {
-        if (state.dragNode) {
+        if (state.dragNode && state.isDraggingNode) {
+            const after = snapshot();
+            if (state.dragStartSnapshot && state.dragStartSnapshot !== after) {
+                history.isRestoring = true;
+                history.past.push(state.dragStartSnapshot);
+                if (history.past.length > history.maxSize) history.past.shift();
+                history.future.length = 0;
+                history.isRestoring = false;
+                updateHistoryButtons();
+            }
             saveDraft();
-            if (state.isDraggingNode) renderPanel(state.dragNode);
+            renderPanel(state.dragNode);
         }
         state.dragNode = null;
         state.isDraggingNode = false;
+        state.dragStartSnapshot = null;
         stage.style.cursor = '';
         window.removeEventListener('mousemove', onNodeDragMove);
         window.removeEventListener('mouseup', onNodeDragEnd);
     }
 
     function redraw() {
-        // Перетаскиваем все узлы и стрелки — пересобираем всё заново, но быстро
-        const activeId = state.activeNodeId;
-        const linkFrom = state.linkFrom;
-
-        // Обновляем позиции в существующих нодах (без полного пересоздания)
         state.nodes.forEach(node => {
             const g = viewportG.querySelector(`[data-node-id="${node.id}"]`);
             if (!g) return;
@@ -514,7 +609,6 @@
             text.querySelectorAll('tspan').forEach(tspan => tspan.setAttribute('x', node.x));
         });
 
-        // Стрелки — удаляем и пересобираем (они дешёвые)
         viewportG.querySelectorAll('.editor-edge').forEach(g => g.remove());
         state.edges.forEach((edge, idx) => {
             const g = buildEdge(edge, idx);
@@ -707,23 +801,53 @@
         const fTemplate = document.getElementById('fTemplate');
         const fTab = document.getElementById('fTab');
 
+        let labelInputTimer = null;
+
         fLabel.addEventListener('input', () => {
             node.label = fLabel.value;
-            // Полная перерисовка — размер блока может измениться
+            rebuildAll();
+            if (state.activeNodeId === node.id) {
+                const g = document.querySelector(`[data-node-id="${node.id}"]`);
+                if (g) g.classList.add('editor-node--active');
+            }
+            saveDraft();
+            if (labelInputTimer) clearTimeout(labelInputTimer);
+            labelInputTimer = setTimeout(() => {
+                pushHistory();
+            }, 800);
+        });
+
+        fType.addEventListener('change', () => {
+            pushHistory();
+            node.type = fType.value;
             rebuildAll();
             selectNode(node.id);
             saveDraft();
         });
-        fType.addEventListener('change', () => { node.type = fType.value; rebuildAll(); selectNode(node.id); saveDraft(); });
-        fTitle.addEventListener('input', () => { node.tooltip.title = fTitle.value; saveDraft(); });
-        fDescription.addEventListener('input', () => { node.tooltip.description = fDescription.value; saveDraft(); });
-        fMacro.addEventListener('input', () => { node.tooltip.macro = fMacro.value; saveDraft(); });
-        fTemplate.addEventListener('input', () => { node.tooltip.template = fTemplate.value; saveDraft(); });
-        fTab.addEventListener('change', () => { node.tooltip.tab = fTab.value; saveDraft(); });
+
+        fTitle.addEventListener('input', () => { node.tooltip.title = fTitle.value; saveDraftDebounced(); });
+        fDescription.addEventListener('input', () => { node.tooltip.description = fDescription.value; saveDraftDebounced(); });
+        fMacro.addEventListener('input', () => { node.tooltip.macro = fMacro.value; saveDraftDebounced(); });
+        fTemplate.addEventListener('input', () => { node.tooltip.template = fTemplate.value; saveDraftDebounced(); });
+        fTab.addEventListener('change', () => {
+            pushHistory();
+            node.tooltip.tab = fTab.value;
+            saveDraft();
+        });
+    }
+
+    let _saveHistoryTimer = null;
+    function saveDraftDebounced() {
+        saveDraft();
+        if (_saveHistoryTimer) clearTimeout(_saveHistoryTimer);
+        _saveHistoryTimer = setTimeout(() => {
+            pushHistory();
+        }, 800);
     }
 
     function deleteNode(id) {
         if (!confirm('Удалить этот блок и все его связи?')) return;
+        pushHistory();
         state.nodes = state.nodes.filter(n => n.id !== id);
         state.edges = state.edges.filter(e => e.from !== id && e.to !== id);
         state.activeNodeId = null;
@@ -764,9 +888,12 @@
             edge.label = e.target.value;
             saveDraft();
             redraw();
+            if (_saveHistoryTimer) clearTimeout(_saveHistoryTimer);
+            _saveHistoryTimer = setTimeout(() => { pushHistory(); }, 800);
         });
         document.getElementById('btnDeleteEdge').addEventListener('click', () => {
             if (!confirm('Удалить эту связь?')) return;
+            pushHistory();
             state.edges.splice(idx, 1);
             state.selectedEdgeIndex = -1;
             rebuildAll();
@@ -820,11 +947,7 @@ ${edgesJs}
         canvas = document.getElementById('algoCanvas');
         panel = document.getElementById('algoPanel');
         if (!stage || !canvas || !panel) return;
-        buildSvg();
-        bindZoom();
-        bindPan();
-        bindControls();
-        setTimeout(() => centerView(), 30);
+        buildSvg(); bindZoom(); bindPan(); bindControls(); setTimeout(() => centerView(), 30);
     }
 
     function buildSvg() {
@@ -1096,10 +1219,30 @@ ${edgesJs}
 
     function bindHotkeys() {
         document.addEventListener('keydown', (e) => {
+            const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
+            const ctrl = isMac ? e.metaKey : e.ctrlKey;
+
+            if (ctrl && e.key.toLowerCase() === 'z' && !e.shiftKey) {
+                e.preventDefault();
+                undo();
+                return;
+            }
+            if (ctrl && (e.key.toLowerCase() === 'y' || (e.key.toLowerCase() === 'z' && e.shiftKey))) {
+                e.preventDefault();
+                redo();
+                return;
+            }
+
             if (e.key === 'Escape') {
-                if (state.linkFrom) { state.linkFrom = null; showLinkHint('🔗 Кликните по блоку-источнику'); rebuildAll(); }
-                else if (state.linkMode) { toggleLinkMode(false); }
-                else deselect();
+                if (state.linkFrom) {
+                    state.linkFrom = null;
+                    showLinkHint('🔗 Кликните по блоку-источнику');
+                    rebuildAll();
+                } else if (state.linkMode) {
+                    toggleLinkMode(false);
+                } else {
+                    deselect();
+                }
             }
             if ((e.key === 'Delete' || e.key === 'Backspace') && state.activeNodeId && document.activeElement.tagName !== 'INPUT' && document.activeElement.tagName !== 'TEXTAREA') {
                 deleteNode(state.activeNodeId);
